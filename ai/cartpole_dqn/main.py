@@ -30,7 +30,6 @@ rewardは常に1．rewardの累計を大きくするのが目標
 DQNってなん入力に対応できる？
 
 パラメータの決定方法について聞きたいね．
-あとはGitHubに公開するだけ
 '''
 import gymnasium as gym
 import numpy as np
@@ -47,8 +46,8 @@ total_reward = 0
 time_step = 0
 average = 20
 reward_datas = []
-# MODEL_SAVE_PATH = "dqn_Cpole_weights.pth"  # モデルの重みを保存するパス
-MODEL_SAVE_PATH = "dqn_Cpole_weights_noisy.pth"  # モデルの重みを保存するパス
+MODEL_SAVE_PATH = "dqn_Cpole_weights.pth"  # モデルの重みを保存するパス
+# MODEL_SAVE_PATH = "dqn_Cpole_weights_noisy.pth"  # モデルの重みを保存するパス
 
 # dqn_lib.py内での絶対パス取得
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -164,11 +163,11 @@ for episode in range(parameters["episodes"]):
     reward_datas.append(total_reward)
     print(f"Episode: {episode}, Total Reward: {total_reward}, Time Step: {time_step}")
 
-# try:
-#     torch.save(Qnet.state_dict(), MODEL_SAVE_PATH)
-#     print(f"モデルの重みを {MODEL_SAVE_PATH} に正常に保存しました。")
-# except Exception as e:
-#     print(f"モデルの重みの保存中にエラーが発生しました: {e}")
+try:
+    torch.save(Qnet.state_dict(), MODEL_SAVE_PATH)
+    print(f"モデルの重みを {MODEL_SAVE_PATH} に正常に保存しました。")
+except Exception as e:
+    print(f"モデルの重みの保存中にエラーが発生しました: {e}")
 
 
 data_20 = []
