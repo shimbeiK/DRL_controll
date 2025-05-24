@@ -1,6 +1,6 @@
 # DRL_controll（ai folder）
 I will upload about Deep Reinforcement Learning with some robot controls!
-
+詳細は[こちらのZenn]([https://zenn.dev/shimbei/scraps/426bdec27678f5](https://zenn.dev/shimbei/scraps/58fb288b134115))にまとめています．
 
 
 # aiフォルダに含まれていないファイルについて
