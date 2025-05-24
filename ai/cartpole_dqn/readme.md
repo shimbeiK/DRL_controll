@@ -1,1 +1,2 @@
-# trt
+# DQNで倒立振子を制御する
+GymnasiumのCartPole環境を用いてDQNで倒立振子をした．詳細はリポジトリのREADMEファイルを参照してください．
