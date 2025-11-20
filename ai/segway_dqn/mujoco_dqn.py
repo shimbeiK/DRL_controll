@@ -21,8 +21,8 @@ from wrapper_gpt import TwoWheeledInvertedPendulumEnv
 # Mujocoの初期設定
 model = mujoco.MjModel.from_xml_path('two_wheel_robot/scene.xml')
 data = mujoco.MjData(model)
-left_idx = model.actuator('motor_l_wheel').id
-right_idx = model.actuator('motor_r_wheel').id
+left_idx = 0
+right_idx = 1
 
 # ハイパーパラメータを取得
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +44,7 @@ parameters = {"lr": json_param["lr"],
 # gymの環境設定
 # env=gym.make('CartPole-v1')
 env = TwoWheeledInvertedPendulumEnv(model, data)
-render_mode = "cpu"
+render_mode = "human"
 env.render(render_mode=render_mode)
 # env=gym.make('CartPole-v1', render_mode='human')
 total_reward = 0
@@ -71,7 +71,7 @@ def select_action(state):
     global change_epsilon
     # if np.random.rand() <= parameters["epsilon"]:
     if np.random.rand() <= change_epsilon:
-        change_epsilon = max(0.01, change_epsilon * 0.995)
+        change_epsilon = max(0.01, change_epsilon - 1e-4)
         # print(change_epsilon)
 
     #     # εの確率でランダムな行動を選択
@@ -152,16 +152,58 @@ for episode in range(parameters["episodes"]):
             time_step += 1
             # w = Qnet.state_dict()
 
-    # 報酬データを保存
-    reward_datas.append(total_reward)
-    print(f"Episode: {episode}, Total Reward: {total_reward}, Time Step: {time_step}")
+        # 報酬データを保存
+        reward_datas.append(total_reward)
+        print(f"Episode: {episode}, Total Reward: {total_reward}, Time Step: {time_step}")
 
     if(render_mode == "human"):
-        with mujoco.viewer.launch_passive(model, data) as viewer:
-            step_start = time.time()
-            print("2秒後に開始します")
-            time.sleep(2)
+        if(episode % 30 == 0):
+            with mujoco.viewer.launch_passive(model, data) as viewer:
+                step_start = time.time()
+                print("2秒後に開始します")
+                time.sleep(2)
 
+                while not episode_over:
+                    # 行動の実行
+                    action = select_action(state)  # 現在の状態から方策に従って行動を選択
+                    next_state, reward, terminated, truncated, data , info = env.step(action) # 選択された行動によって環境を更新
+                    episode_over = terminated or truncated
+
+                    # リプレイバッファに保存
+                    Replay_Buffer.add(state, action, reward, next_state, episode_over)
+                    
+                    state = next_state
+                    if len(Replay_Buffer) >= parameters["batch_size"]:
+                        # バッファに十分データが溜まっていれば，バッファからバッチサイズ分をサンプリング
+                        states, actions, rewards, next_states, dones = Replay_Buffer.sampling()
+                        # Qネットワークの学習
+                        calc_TDerror(states, actions, next_states, rewards, dones)
+                        
+                    # 一定のtime_stepごとターゲットネットワークの重みを更新
+                    if time_step % parameters["td_interval"] == 0:
+                        Tnet.load_state_dict(Qnet.state_dict())
+                    
+                    # print(next_state, reward, terminated, truncated, info)
+                    total_reward += reward
+                    time_step += 1
+                    # w = Qnet.state_dict()
+
+                    viewer.sync()
+                    rotmat = data.xmat[1].reshape(3, 3)
+                    rot = R.from_matrix(rotmat)
+                    euler = rot.as_euler('xyz', degrees=True)
+
+                    # print("pos-data:",data.xpos[1], data.qpos[1])
+                    # print("angle-data:",euler)
+                    # print("angle-vel:",data.qvel[1])
+                    # print("Total Reward:", total_reward)
+                    # print("Time Step:", time_step)
+
+                    time_until_next_step = model.opt.timestep - (time.time() - step_start)
+                    # print(model.opt.timestep, time.time() - step_start)
+                    if time_until_next_step > 0:
+                        time.sleep(time_until_next_step)
+        else:
             while not episode_over:
                 # 行動の実行
                 action = select_action(state)  # 現在の状態から方策に従って行動を選択
@@ -171,6 +213,9 @@ for episode in range(parameters["episodes"]):
                 # リプレイバッファに保存
                 Replay_Buffer.add(state, action, reward, next_state, episode_over)
                 
+                # 外乱制御
+                # disturbance_control(noise, next_state, time_step)
+
                 state = next_state
                 if len(Replay_Buffer) >= parameters["batch_size"]:
                     # バッファに十分データが溜まっていれば，バッファからバッチサイズ分をサンプリング
@@ -185,23 +230,6 @@ for episode in range(parameters["episodes"]):
                 # print(next_state, reward, terminated, truncated, info)
                 total_reward += reward
                 time_step += 1
-                # w = Qnet.state_dict()
-
-                viewer.sync()
-                rotmat = data.xmat[1].reshape(3, 3)
-                rot = R.from_matrix(rotmat)
-                euler = rot.as_euler('xyz', degrees=True)
-
-                print("pos-data:",data.xpos[1], data.qpos[1])
-                print("angle-data:",euler)
-                print("angle-vel:",data.qvel[1])
-                print("Total Reward:", total_reward)
-                print("Time Step:", time_step)
-
-                time_until_next_step = model.opt.timestep - (time.time() - step_start)
-                # print(model.opt.timestep, time.time() - step_start)
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
 
 
         # 報酬データを保存

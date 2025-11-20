@@ -51,7 +51,7 @@ print(data.xpos, euler)
 time_step = 0
 average = 20
 reward_datas = []
-MODEL_SAVE_PATH = "mujoco_Cpole_weights.pth"  # モデルの重みを保存するパス
+MODEL_SAVE_PATH = "mujoco_better1.pth"  # モデルの重みを保存するパス
 Qnet = N_Network()
 Qnet.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location="cpu")) # 学習済みモデルの重みを読み込む
 Qnet.eval()
@@ -72,13 +72,15 @@ episode_over = False
 with mujoco.viewer.launch_passive(model, data) as viewer:
     step_start = time.time()
     print("2秒後に開始します")
+    mujoco.mj_forward(model, data)
     time.sleep(2)
+    mujoco.mj_step(model, data)
 
     while not episode_over:
         # 行動の実行
         action = select_action(state)  # 現在の状態から方策に従って行動を選択
         next_state, reward, terminated, truncated, data, info = env.step(action) # 選択された行動によって環境を更新
-        episode_over = terminated or truncated
+        # episode_over = terminated or truncated
 
         state = next_state
         
