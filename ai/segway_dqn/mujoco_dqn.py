@@ -1,11 +1,10 @@
 '''
-・Envの調整
-・DQNを導入
-・行動と状態をDQNと合併
+そろそろパラメータと結果の対応を記録しよう。
+その前に初期ノイズ入れるか
 
-１．action:角速度を与えることで変化を求める（最初は位置変化を与えるだけ）
-２．actionによって得られたモデルを描画し、位置と速度を得る
-３．フィードバックする（正しい報酬が出力されているか確認する）
+1201_2:学習率低減、ε減衰をより緩やかに
+1201_2:行動サイズを11から1023に変更、初期epsilonを0.8から0.6に
+1204_2:報酬にトルク含む
 '''
 
 import mujoco
@@ -15,230 +14,184 @@ import gymnasium as gym
 import numpy as np
 import time, json, torch, os
 import matplotlib.pyplot as plt
-from dqn_lib import N_Network, ReplayBuffer
+from dqn_lib import N_Network, PrioritizedReplayBuffer  # PERバッファをインポート
 from wrapper_gpt import TwoWheeledInvertedPendulumEnv
+import torch.nn.functional as F
 
-# Mujocoの初期設定
+# Mujocoの設定
 model = mujoco.MjModel.from_xml_path('two_wheel_robot/scene.xml')
 data = mujoco.MjData(model)
-left_idx = 0
-right_idx = 1
 
-# ハイパーパラメータを取得
+# パラメータ読み込み（dqn_libと同様）
 current_dir = os.path.dirname(os.path.abspath(__file__))
 json_path = os.path.join(current_dir, "parameters_dqn.json")
 with open(json_path, 'r') as f:
     json_param = json.load(f)["dqn_cartpole"]
-parameters = {"lr": json_param["lr"],
-            "gamma": json_param["gamma"],
-            "episodes": json_param["episodes"],
-            "epsilon": json_param["epsilon"],
-            "buffer_size": json_param["buffer_size"],
-            "batch_size": json_param["batch_size"],
-            "td_interval": json_param["td_interval"],
-            "input_size":json_param["input_size"],
-            "action_size": json_param["action_size"],
-            "max_step": json_param["max_step"]
-}
+parameters = json_param # 簡略化のためそのまま代入
 
-# gymの環境設定
-# env=gym.make('CartPole-v1')
+# 環境とネットワーク設定
 env = TwoWheeledInvertedPendulumEnv(model, data)
-render_mode = "human"
-env.render(render_mode=render_mode)
-# env=gym.make('CartPole-v1', render_mode='human')
-total_reward = 0
-# print(env.reset())
-(state,_)=env.reset()
-time_step = 0
-average = 20
-reward_datas = []
-MODEL_SAVE_PATH = "mujoco_Cpole_weights.pth"  # モデルの重みを保存するパス
-# MODEL_SAVE_PATH = "dqn_Cpole_weights_noisy.pth"  # モデルの重みを保存するパス
+render_mode = "cpu"
+preliminary_total_reward = 5000
+
 Qnet = N_Network()
-# Qnet.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location="cpu")) # 学習済みモデルの重みを読み込む
 Tnet = N_Network()
 Tnet.load_state_dict(Qnet.state_dict())
 Tnet.eval()
-Replay_Buffer = ReplayBuffer(parameters["buffer_size"], parameters["batch_size"])
-optimizer = torch.optim.Adam(Qnet.parameters(), lr=parameters["lr"])
 
-change_epsilon = parameters["epsilon"] # ε-greedy法の初期値  
-# ε-greedyポリシーに従って行動を選択
- 
+# PER用バッファに変更
+Replay_Buffer = PrioritizedReplayBuffer(parameters["buffer_size"], parameters["batch_size"])
+
+# ★重要修正: オプティマイザはループの外で一度だけ定義
+var_lr = parameters["lr"]
+optimizer = torch.optim.Adam(Qnet.parameters(), lr=var_lr)
+
+change_epsilon = parameters["epsilon"]
+global_step = 0 # ターゲットネットワーク更新用（エピソードまたぎ）
+td_interval = parameters["td_interval"]
+reward_datas = []
+
+MODEL_SAVE_PATH = "mujoco_Cpole_weights_1204_2.pth"  # モデルの重みを保存するパス
+
 
 def select_action(state):
     global change_epsilon
-    # if np.random.rand() <= parameters["epsilon"]:
     if np.random.rand() <= change_epsilon:
-        change_epsilon = max(0.01, change_epsilon - 1e-4)
-        # print(change_epsilon)
-
-    #     # εの確率でランダムな行動を選択
         return np.random.randint(0, parameters["action_size"])
-    # 1-εの確率で最適方策に基づいて価値関数を更新
     else:
-        state = torch.FloatTensor(state).unsqueeze(0) # PyTorchのTensorに変換＋バッチ形式に対応
-        with torch.no_grad(): # 勾配計算を無効化：順伝搬してるだけで学習はしなくていいから
-            # print(Qnet(state), Qnet(state).argmax())
+        state = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
             return Qnet(state).argmax().item()
-        
-def calc_TDerror(states, actions, next_states, rewards, dones):
-    # QネットワークとターゲットネットワークからQ値を取得（TD誤差を求めるため）
-    # print(actions)
-    actions = torch.LongTensor(actions).unsqueeze(1)  # [batch_size] → [batch_size, 1]
-    q_values = Qnet(states) # → Q(s_t, ·) 全アクションのQ値を出力（形状：[batch_size, action_dim]）
-    # print(q_values, action)
-    q_value = q_values.gather(1, actions).squeeze() # actionに対応するQ値を出力（形状：[batch_size]
+
+def update_model():
+    """TD誤差計算と重み更新"""
+    # PERサンプリング (インデックスとIS重みも受け取る)
+    states, actions, rewards, next_states, dones, idxs, is_weights = Replay_Buffer.sampling()
+
+    actions = actions.unsqueeze(1)
+    q_values = Qnet(states).gather(1, actions).squeeze()
 
     with torch.no_grad():
         next_q_max = Tnet(next_states).max(1)[0]
-        q_value_target = rewards + (1 - dones) * parameters["gamma"] * next_q_max # Q値のターゲット値をベルマン方程式 に従って計算
+        q_value_target = rewards + (1 - dones) * parameters["gamma"] * next_q_max
 
-    # Q値から価値関数とTD誤差を計算．TD誤差を最小化するようにQネットワークのパラメータを更新する
-    loss = torch.nn.MSELoss()(q_value, q_value_target)
+    # PER用に個別のTD誤差（絶対値）を計算（勾配計算は不要なのでno_grad推奨だが、ここではLoss計算に使うため保持）
+    td_errors = torch.abs(q_value_target - q_values).detach().numpy()
 
-    # 深層学習のルールに従ってQネットワークのパラメータを更新
-    optimizer.zero_grad() # 勾配を初期化
-    loss.backward() # 誤差逆伝播法で勾配を計算
-    optimizer.step() # Qネットワークのパラメータ(重み)を更新
+    # 優先度の更新
+    Replay_Buffer.update_priorities(idxs, td_errors)
 
-def disturbance_control(noise, next_state, time_step):
-    # 外乱制御の実装（必要に応じて）
-    if np.random.rand() <= noise:
-        print("do")
-        next_state[1] += np.random.normal(0, 500) # カート速度に外乱
-        next_state[3] += np.random.normal(0, 500) # ポール角速度に外乱
-    if time_step != 0:
-        noise = 0.01 * int(time_step % parameters["episodes"] * 0.01)
-        # print(noise)
-        print(int(time_step % parameters["episodes"] * 0.01))
+    # 損失関数の計算（IS重みを適用）
+    # 重み付きMSE: (w * (Q - Target)^2).mean()
+    loss = (is_weights * F.mse_loss(q_values, q_value_target, reduction='none')).mean()
 
-# episodes回学習をする
-print("ok")
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+diff_epsilon = 1e-5
+def train_step(state, episode):
+    global global_step, change_epsilon, optimizer, var_lr
+
+    action = select_action(state)
+    next_state, reward, terminated, truncated, data, info = env.step(action)
+    episode_over = terminated or truncated
+
+    Replay_Buffer.add(state, action, reward, next_state, episode_over)
+
+    # バッチサイズ以上溜まったら学習
+    if len(Replay_Buffer) >= parameters["batch_size"]:
+        update_model()
+
+    # ターゲットネットワークの同期 (global_stepで管理)
+    if global_step % parameters["td_interval"] == 0:
+        Tnet.load_state_dict(Qnet.state_dict())
+        print("Target Network Updated")
+    
+    # εの減衰 (ステップごと or エピソードごと。ここではステップごとに少しずつ)
+    if change_epsilon > 0.02:
+        diff_epsilon = (parameters["episodes"] - episode) / 300 * 1e-6
+        if change_epsilon < 0.1:
+            var_lr -= (parameters["episodes"] - episode) / 6000 * 1e-9
+            var_lr = max(var_lr, 0.00001)
+            # ★修正2: 計算した var_lr をオプティマイザに反映させる！
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = var_lr
+            diff_epsilon = (parameters["episodes"] - episode) / 2500 * 1e-6
+        elif change_epsilon < 0.2:
+            diff_epsilon = (parameters["episodes"] - episode) / 2000 * 1e-6
+        elif change_epsilon < 0.3:
+            diff_epsilon = (parameters["episodes"] - episode) / 1500 * 1e-6
+        elif change_epsilon < 0.5:
+            diff_epsilon = (parameters["episodes"] - episode) / 1000 * 1e-6
+            
+        change_epsilon -= diff_epsilon
+
+    global_step += 1
+    return next_state, reward, episode_over
+
 for episode in range(parameters["episodes"]):
-    # 環境のリセット
     state, _ = env.reset()
-    time_step = 0 # 本質はtotal_rewardと同じだが分かり易くするために分けた
-    episode_over = False
-    noise = 0
+    time_step = 0
     total_reward = 0
-    if(render_mode == "cpu"):
-        while not episode_over:
-            # 行動の実行
-            action = select_action(state)  # 現在の状態から方策に従って行動を選択
-            next_state, reward, terminated, truncated, data , info = env.step(action) # 選択された行動によって環境を更新
-            episode_over = terminated or truncated
+    episode_over = False
+    
+    # 描画モードの判定（humanかつ30エピソードごとの場合のみ描画）
+    is_render_episode = (render_mode == "human" and episode % 50 == 0)
 
-            # リプレイバッファに保存
-            Replay_Buffer.add(state, action, reward, next_state, episode_over)
+    if is_render_episode:
+        # 描画ありの実行
+        with mujoco.viewer.launch_passive(model, data) as viewer:
+            print(f"Episode {episode}: Rendering...")
+            step_start = time.time()
             
-            # 外乱制御
-            # disturbance_control(noise, next_state, time_step)
-
-            state = next_state
-            if len(Replay_Buffer) >= parameters["batch_size"]:
-                # バッファに十分データが溜まっていれば，バッファからバッチサイズ分をサンプリング
-                states, actions, rewards, next_states, dones = Replay_Buffer.sampling()
-                # Qネットワークの学習
-                calc_TDerror(states, actions, next_states, rewards, dones)
-                
-            # 一定のtime_stepごとターゲットネットワークの重みを更新
-            if time_step % parameters["td_interval"] == 0:
-                Tnet.load_state_dict(Qnet.state_dict())
-            
-            # print(next_state, reward, terminated, truncated, info)
-            total_reward += reward
-            time_step += 1
-            # w = Qnet.state_dict()
-
-        # 報酬データを保存
-        reward_datas.append(total_reward)
-        print(f"Episode: {episode}, Total Reward: {total_reward}, Time Step: {time_step}")
-
-    if(render_mode == "human"):
-        if(episode % 30 == 0):
-            with mujoco.viewer.launch_passive(model, data) as viewer:
-                step_start = time.time()
-                print("2秒後に開始します")
-                time.sleep(2)
-
-                while not episode_over:
-                    # 行動の実行
-                    action = select_action(state)  # 現在の状態から方策に従って行動を選択
-                    next_state, reward, terminated, truncated, data , info = env.step(action) # 選択された行動によって環境を更新
-                    episode_over = terminated or truncated
-
-                    # リプレイバッファに保存
-                    Replay_Buffer.add(state, action, reward, next_state, episode_over)
-                    
-                    state = next_state
-                    if len(Replay_Buffer) >= parameters["batch_size"]:
-                        # バッファに十分データが溜まっていれば，バッファからバッチサイズ分をサンプリング
-                        states, actions, rewards, next_states, dones = Replay_Buffer.sampling()
-                        # Qネットワークの学習
-                        calc_TDerror(states, actions, next_states, rewards, dones)
-                        
-                    # 一定のtime_stepごとターゲットネットワークの重みを更新
-                    if time_step % parameters["td_interval"] == 0:
-                        Tnet.load_state_dict(Qnet.state_dict())
-                    
-                    # print(next_state, reward, terminated, truncated, info)
-                    total_reward += reward
-                    time_step += 1
-                    # w = Qnet.state_dict()
-
-                    viewer.sync()
-                    rotmat = data.xmat[1].reshape(3, 3)
-                    rot = R.from_matrix(rotmat)
-                    euler = rot.as_euler('xyz', degrees=True)
-
-                    # print("pos-data:",data.xpos[1], data.qpos[1])
-                    # print("angle-data:",euler)
-                    # print("angle-vel:",data.qvel[1])
-                    # print("Total Reward:", total_reward)
-                    # print("Time Step:", time_step)
-
-                    time_until_next_step = model.opt.timestep - (time.time() - step_start)
-                    # print(model.opt.timestep, time.time() - step_start)
-                    if time_until_next_step > 0:
-                        time.sleep(time_until_next_step)
-        else:
             while not episode_over:
-                # 行動の実行
-                action = select_action(state)  # 現在の状態から方策に従って行動を選択
-                next_state, reward, terminated, truncated, data , info = env.step(action) # 選択された行動によって環境を更新
-                episode_over = terminated or truncated
-
-                # リプレイバッファに保存
-                Replay_Buffer.add(state, action, reward, next_state, episode_over)
+                # 学習ステップの実行
+                state, reward, episode_over = train_step(state, episode)
                 
-                # 外乱制御
-                # disturbance_control(noise, next_state, time_step)
-
-                state = next_state
-                if len(Replay_Buffer) >= parameters["batch_size"]:
-                    # バッファに十分データが溜まっていれば，バッファからバッチサイズ分をサンプリング
-                    states, actions, rewards, next_states, dones = Replay_Buffer.sampling()
-                    # Qネットワークの学習
-                    calc_TDerror(states, actions, next_states, rewards, dones)
-                    
-                # 一定のtime_stepごとターゲットネットワークの重みを更新
-                if time_step % parameters["td_interval"] == 0:
-                    Tnet.load_state_dict(Qnet.state_dict())
-                
-                # print(next_state, reward, terminated, truncated, info)
                 total_reward += reward
                 time_step += 1
+                
+                # ビューワーの同期
+                viewer.sync()
+                
+                # 実時間同期（シミュレーション速度を現実に合わせる処理）
+                time.sleep(model.opt.timestep)
+                # time_until_next_step = model.opt.timestep - (time.time() - step_start)
+                # if time_until_next_step > 0:
+                #     time.sleep(time_until_next_step)
+                # step_start = time.time()
+    else:
+        # 描画なしの実行（高速）
+        while not episode_over:
+            state, reward, episode_over = train_step(state, episode)
+            total_reward += reward
+            time_step += 1
 
+    # if(time_step < parameters["max_step"] / 1.5):
+    #     total_reward += time_step / 5  # 最大ステップ到達ボーナス
+        # print(time_step / 2)
 
-        # 報酬データを保存
-        reward_datas.append(total_reward)
-        print(f"Episode: {episode}, Total Reward: {total_reward}, Time Step: {time_step}")
+    # エピソード終了後の処理
+    reward_datas.append(total_reward)
+    
+    # 成功判定ロジック（元のコードを踏襲）
+    # if total_reward >= 2000 and var_lr > 0.0001:
+    #     var_lr *= 0.9
+    #     print(var_lr)
+            
+    if (total_reward >= preliminary_total_reward):
+        try:
+            preliminary_total_reward = total_reward
+            torch.save(Qnet.state_dict(), MODEL_SAVE_PATH)
+            print(f"モデルの重みを {MODEL_SAVE_PATH} に正常に保存しました。")
+        except Exception as e:
+            print(f"モデルの重みの保存中にエラーが発生しました: {e}")
+    
+    print(f"Episode: {episode}, Total Reward: {total_reward:.2f}, Time Step: {time_step}, Epsilon: {change_epsilon:.4f}")
 
-
-try:
-    torch.save(Qnet.state_dict(), MODEL_SAVE_PATH)
-    print(f"モデルの重みを {MODEL_SAVE_PATH} に正常に保存しました。")
-except Exception as e:
-    print(f"モデルの重みの保存中にエラーが発生しました: {e}")
+# try:
+#     torch.save(Qnet.state_dict(), MODEL_SAVE_PATH)
+#     print(f"モデルの重みを {MODEL_SAVE_PATH} に正常に保存しました。")
+# except Exception as e:
+#     print(f"モデルの重みの保存中にエラーが発生しました: {e}")

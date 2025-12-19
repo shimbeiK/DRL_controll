@@ -51,7 +51,7 @@ print(data.xpos, euler)
 time_step = 0
 average = 20
 reward_datas = []
-MODEL_SAVE_PATH = "mujoco_better1.pth"  # モデルの重みを保存するパス
+MODEL_SAVE_PATH = "mujoco_Cpole_weights_1204_2.pth"  # モデルの重みを保存するパス
 Qnet = N_Network()
 Qnet.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location="cpu")) # 学習済みモデルの重みを読み込む
 Qnet.eval()
@@ -63,10 +63,27 @@ def select_action(state):
         # print(Qnet(state), Qnet(state).argmax())
         return Qnet(state).argmax().item()
 
+# "chassis" ボディのIDを取得
+chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+counter = 0
+def give_noise():
+    global counter
+    if np.random.rand() >= 0.997:
+        counter += 1
+        # xfrc_applied[body_id] = [fx, fy, fz, tx, ty, tz] (力3次元 + トルク3次元)
+        # X軸方向に 5 Newton の力を加える
+        data.xfrc_applied[chassis_id] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+        print(counter)
+    else:
+        # 外乱がない時はゼロに戻す（重要）
+        data.xfrc_applied[chassis_id] = np.zeros(6)
+    # ------------------
+
 state, _ = env.reset()
 total_reward = 0
 time_step = 0 # 本質はtotal_rewardと同じだが分かり易くするために分けた
 episode_over = False
+terminated = False
 
 # ビューワー起動
 with mujoco.viewer.launch_passive(model, data) as viewer:
@@ -76,7 +93,7 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
     time.sleep(2)
     mujoco.mj_step(model, data)
 
-    while not episode_over:
+    while not (episode_over):
         # 行動の実行
         action = select_action(state)  # 現在の状態から方策に従って行動を選択
         next_state, reward, terminated, truncated, data, info = env.step(action) # 選択された行動によって環境を更新
@@ -93,10 +110,15 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
         rotmat = data.xmat[1].reshape(3, 3)
         rot = R.from_matrix(rotmat)
         euler = rot.as_euler('xyz', degrees=True)
-        time_until_next_step = model.opt.timestep - (time.time() - step_start)
-        # print(model.opt.timestep, time.time() - step_start)
-        if time_until_next_step > 0:
-            time.sleep(time_until_next_step)
+        # time_until_next_step = model.opt.timestep - (time.time() - step_start)
+        # # print(model.opt.timestep, time.time() - step_start)
+        # if time_until_next_step > 0:
+        #     time.sleep(time_until_next_step)
+        time.sleep(model.opt.timestep)
+        # give_noise()
+
+        if(terminated):
+            env.reset()
 
 # imageio.mimsave("cartpole.gif", frames, fps=30)
 env.close()

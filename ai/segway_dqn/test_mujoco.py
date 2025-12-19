@@ -35,14 +35,14 @@ with mujoco.viewer.launch_passive(m, d) as viewer:
         step_start = time.time()
 
         # モーターに角速度を指令する場合
-        if(counter <= 3):
+        if(counter <= 100):
             d.ctrl[0] = target_left_velocity
-            d.ctrl[1] = target_right_velocity
-        #     print("a")
-        # elif(counter <= 6):
-        #     d.ctrl[0] = - target_left_velocity
-        #     d.ctrl[1] = - target_right_velocity
-        #     print("bb")
+            d.ctrl[1] = target_left_velocity
+            print("a")
+        elif(counter <= 200):
+            d.ctrl[0] = - target_left_velocity
+            d.ctrl[1] = - target_left_velocity
+            print("bb")
         else:
             counter = 0
         counter += 1
@@ -82,8 +82,9 @@ with mujoco.viewer.launch_passive(m, d) as viewer:
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = int(d.time % 2)
 
         viewer.sync()
+        time.sleep(m.opt.timestep/10)
 
-        time_until_next_step = m.opt.timestep - (time.time() - step_start)
-        # print(m.opt.timestep, time.time() - step_start)
-        if time_until_next_step > 0:
-            time.sleep(time_until_next_step)
+        # time_until_next_step = m.opt.timestep - (time.time() - step_start)
+        # # print(m.opt.timestep, time.time() - step_start)
+        # if time_until_next_step > 0:
+        #     time.sleep(time_until_next_step)
